@@ -118,7 +118,9 @@ const callGroqAPI = async (systemPrompt, userPrompt, retries = 3) => {
       if (error.response) {
         console.error('Groq API Error:', error.response.data);
         if (error.response.status === 429) {
-          throw new Error('Rate limit exceeded. Please wait a moment and try again.');
+          // Calculate reset time (60 seconds from now)
+          const resetTime = new Date(Date.now() + 60000);
+          throw new Error(`RATE_LIMIT:${resetTime.toISOString()}`);
         }
       } else if (error.message.includes('JSON')) {
         console.error('JSON Parsing Error:', error.message);
@@ -149,7 +151,8 @@ Return this exact JSON structure:
     "domainAge": 0-1,
     "urgencyPressure": 0-1,
     "identityVague": 0-1,
-    "documentRequest": 0-1
+    "documentRequest": 0-1,
+    "highSalary": 0-1
   },
   "flaggedElements": [
     {"signal": "signal name", "evidence": "exact quote from listing", "explanation": "why this is suspicious"}
@@ -192,7 +195,33 @@ Job listing: ${listingText}`;
 
 // PROMPT 3: Ghost Job Detection (requires web search results)
 export const analyzeGhostJobSignals = async (companyName, jobTitle, serperResults) => {
-  const systemPrompt = `You are a ghost job investigator. Ghost jobs are real companies posting roles they never intend to fill. Return ONLY valid JSON. No preamble. No markdown.`;
+  // Check if company name is vague/unknown
+  const isUnknownCompany = companyName.toLowerCase().includes('unknown') ||
+                          companyName.toLowerCase().includes('company') ||
+                          companyName.length < 3;
+  
+  if (isUnknownCompany) {
+    // Return neutral signals when company cannot be identified
+    return {
+      signals: {
+        repostFrequency: 0,
+        headcountRatio: 0,
+        recentLayoffs: 0,
+        fundingMismatch: 0,
+        listingAge: 0
+      },
+      companyExists: false,
+      recentLayoffs: 'unknown',
+      openRolesVsHeadcount: 'Cannot verify — insufficient company information',
+      fundingSignal: 'Cannot verify — insufficient company information',
+      ghostRedFlags: [],
+      ghostSummary: 'Cannot assess ghost job risk — company name not specified in listing. This is a red flag for legitimacy, but not enough data to determine if role would be filled.'
+    };
+  }
+  
+  const systemPrompt = `You are a ghost job investigator. Ghost jobs are real companies posting roles they never intend to fill. Return ONLY valid JSON. No preamble. No markdown.
+
+CRITICAL: Only use findings that are specifically about "${companyName}". Do NOT present generic industry trends (e.g., "100 companies laying off") as company-specific evidence. If search results contain only generic market data, state "insufficient company-specific data" rather than misattributing industry trends to this employer.`;
   
   const userPrompt = `Based on this web research about ${companyName}, analyze whether this job posting is likely a ghost job.
 
@@ -210,12 +239,12 @@ Return this exact JSON structure:
   },
   "companyExists": true/false,
   "recentLayoffs": true/false/unknown,
-  "openRolesVsHeadcount": "finding",
-  "fundingSignal": "finding",
+  "openRolesVsHeadcount": "finding specific to ${companyName} or 'insufficient data'",
+  "fundingSignal": "finding specific to ${companyName} or 'insufficient data'",
   "ghostRedFlags": [
-    {"signal": "signal name", "evidence": "specific finding", "source": "url or 'community data'"}
+    {"signal": "signal name", "evidence": "specific finding about ${companyName} only", "source": "url or 'community data'"}
   ],
-  "ghostSummary": "2 sentences plain language"
+  "ghostSummary": "2 sentences about ${companyName} specifically, or state insufficient data"
 }`;
 
   return await callGroqAPI(systemPrompt, userPrompt);
@@ -251,14 +280,15 @@ Return JSON:
 
 // Weighted Scoring Engine
 export const calculateScores = (scamSignals, ghostSignals, roiSignals, communityReports = null) => {
-  // SCAM SCORE calculation
+  // SCAM SCORE calculation (7 signals, weights sum to 1.0)
   const scamScore = Math.round(
-    (scamSignals.emailMismatch * 0.25 +
-     scamSignals.paymentLanguage * 0.30 +
-     scamSignals.domainAge * 0.20 +
-     (scamSignals.urgencyPressure * 0.15) +
-     (scamSignals.identityVague * 0.05) +
-     (scamSignals.documentRequest * 0.05)) * 100
+    (scamSignals.emailMismatch * 0.20 +
+     scamSignals.paymentLanguage * 0.25 +
+     scamSignals.domainAge * 0.15 +
+     scamSignals.urgencyPressure * 0.10 +
+     scamSignals.identityVague * 0.15 +
+     scamSignals.documentRequest * 0.05 +
+     scamSignals.highSalary * 0.10) * 100
   );
 
   // GHOST SCORE calculation
@@ -399,4 +429,161 @@ Guidelines:
     console.error('Chat AI error:', error);
     throw new Error('Failed to get AI response. Please try again.');
   }
+};
+
+// CV Match Analysis - Text comparison between CV and job listing
+export const analyzeCVMatch = async (cvText, listingText) => {
+  const systemPrompt = `You are a career matching analyst. Analyze the CV against the job listing by comparing actual text content. Return ONLY valid JSON. No preamble. No markdown.
+
+CRITICAL: 
+- Extract actual skills, experience, and keywords from BOTH texts
+- Do NOT invent scores or percentages (no "ATS Score: 82%")
+- Show what's present and what's missing as lists
+- Reference specific text from both CV and listing
+- Provide actionable improvement suggestions based on actual gaps`;
+  
+  const userPrompt = `Compare this CV against this job listing. Extract and compare actual content.
+
+JOB LISTING:
+${listingText}
+
+CV/RESUME:
+${cvText}
+
+Return this exact JSON structure:
+{
+  "skillsPresent": [
+    {"skill": "skill name", "evidence": "where it appears in CV (quote or description)"}
+  ],
+  "skillsMissing": [
+    {"skill": "skill name", "required": true/false, "note": "required/preferred in listing"}
+  ],
+  "experienceAnalysis": {
+    "listingRequires": "extract years/level required from listing",
+    "cvShows": "extract years/level from CV",
+    "gap": "describe any gap or match"
+  },
+  "keywordMatch": {
+    "present": ["keyword1", "keyword2"],
+    "missing": ["keyword3", "keyword4"],
+    "total": "X of Y keywords present"
+  },
+  "redFlags": [
+    {"flag": "description of mismatch", "detail": "specific explanation with quotes"}
+  ],
+  "improvementSuggestions": [
+    "specific actionable suggestion based on actual gaps",
+    "another specific suggestion",
+    "third specific suggestion"
+  ]
+}`;
+
+  return await callGroqAPI(systemPrompt, userPrompt);
+};
+
+// Decision Confidence Band - Synthesizes 4 real scores into one verdict
+export const calculateDecisionConfidence = (scamScore, ghostScore, roiScore, scamConfidence, ghostConfidence, roiConfidence, communityStats = null) => {
+  // Determine overall confidence band
+  let confidenceBand = 'MEDIUM';
+  let primaryConcern = null;
+  let recommendedAction = '';
+  let assessment = '';
+  
+  // Analyze primary concerns
+  if (scamScore > 70) {
+    confidenceBand = 'HIGH';
+    primaryConcern = 'scam';
+    assessment = 'This appears to be a high-risk opportunity with multiple fraud signals detected. The company or listing shows patterns commonly associated with job scams.';
+    recommendedAction = 'Do not proceed unless you can independently verify the company\'s legitimacy through official channels. Search "[Company Name] + scam" independently and verify recruiter identity on LinkedIn before sharing any personal information.';
+  } else if (ghostScore > 70) {
+    confidenceBand = 'HIGH';
+    primaryConcern = 'ghost';
+    assessment = 'This appears to be a legitimate company, but shows strong signs of posting roles they may not actively fill. Multiple ghost job indicators detected.';
+    recommendedAction = 'Apply, and set your own follow-up reminder — most roles either respond or go quiet within 2-3 weeks. If no response by then, move on to other opportunities. Consider finding a real employee on LinkedIn to confirm the role is actively hiring.';
+  } else if (scamScore > 40 || ghostScore > 40) {
+    confidenceBand = 'MEDIUM';
+    primaryConcern = scamScore > ghostScore ? 'scam' : 'ghost';
+    assessment = scamScore > ghostScore 
+      ? 'Some fraud signals detected, but not conclusive. The opportunity may be legitimate but requires verification.'
+      : 'Some ghost job indicators present. The company exists but may not be actively filling this role.';
+    recommendedAction = 'Verify before investing significant time. Apply, and set your own follow-up reminder — most roles either respond or go quiet within 2-3 weeks. Research the company independently.';
+  } else if (roiScore < 30) {
+    confidenceBand = 'MEDIUM';
+    primaryConcern = 'roi';
+    assessment = 'This appears to be a legitimate opportunity, but the application ROI is low. High competition or poor skill match detected.';
+    recommendedAction = 'Apply only if you have spare time and can tailor your application specifically. Generic applications are unlikely to succeed. Consider whether your time would be better spent on higher-ROI opportunities.';
+  } else {
+    confidenceBand = 'LOW';
+    primaryConcern = null;
+    assessment = 'This appears to be a legitimate opportunity with reasonable application value. No major red flags detected across scam, ghost, or ROI signals.';
+    recommendedAction = 'Apply, and set your own follow-up reminder — most roles either respond or go quiet within 2-3 weeks. Continue to verify independently as you would with any opportunity.';
+  }
+
+  // Build community signal text
+  let communitySignal = 'No reports yet';
+  let communityNote = 'This is a new listing in our system — community signal will strengthen as more users report outcomes';
+  
+  if (communityStats && communityStats.total > 0) {
+    const scamReports = communityStats.scam || 0;
+    const ghostReports = communityStats.ghost || 0;
+    const legitimateReports = communityStats.legitimate || 0;
+    const noResponseReports = communityStats.no_response || 0;
+    
+    communitySignal = `${communityStats.total} community reports`;
+    communityNote = `${scamReports} scam, ${ghostReports} ghost, ${noResponseReports} no response, ${legitimateReports} legitimate`;
+    
+    // Upgrade confidence if strong community signal
+    if (scamReports > 10 || ghostReports > 10) {
+      confidenceBand = 'HIGH';
+    }
+  }
+
+  return {
+    confidenceBand,
+    primaryConcern,
+    assessment,
+    recommendedAction,
+    communitySignal,
+    communityNote,
+    signals: {
+      scam: { score: scamScore, confidence: scamConfidence },
+      ghost: { score: ghostScore, confidence: ghostConfidence },
+      roi: { score: roiScore, confidence: roiConfidence },
+      community: { signal: communitySignal, note: communityNote }
+    }
+  };
+};
+
+// Salary Intelligence Analysis - Analyzes salary against market data from Serper
+export const analyzeSalaryIntelligence = async (statedSalary, jobTitle, location, serperResults) => {
+  const systemPrompt = `You are a salary intelligence analyst. Analyze the stated salary against real market data from web search results. Return ONLY valid JSON. No preamble. No markdown.
+
+CRITICAL:
+- Extract actual salary ranges from the search results (cite sources)
+- Do NOT invent salary ranges or negotiation thresholds
+- Show what the search results actually say
+- Compare stated salary to found market data
+- If no market data found, say so honestly`;
+  
+  const userPrompt = `Analyze this salary against market data.
+
+Stated Salary: ${statedSalary}
+Job Title: ${jobTitle}
+Location: ${location}
+
+Web Search Results:
+${serperResults}
+
+Return this exact JSON structure:
+{
+  "marketData": [
+    {"source": "source name (e.g., Glassdoor, LinkedIn)", "range": "actual range from search", "link": "url if available"}
+  ],
+  "assessment": "within range" | "above market" | "below market" | "insufficient data",
+  "explanation": "2-3 sentences comparing stated salary to found market data, citing specific sources",
+  "redFlags": ["red flag 1 if any", "red flag 2 if any"],
+  "note": "Salary data is from public sources and may not reflect your specific situation. Use as one reference point among many."
+}`;
+
+  return await callGroqAPI(systemPrompt, userPrompt);
 };

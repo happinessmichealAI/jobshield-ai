@@ -12,7 +12,13 @@ function TrustGraph({ companyName, scamScore, ghostScore, roiScore, analysisData
         score = (100 - ghostScore); // Lower ghost score = better company
         break;
       case 'recruiter':
-        score = (100 - scamScore); // Lower scam score = better recruiter
+        // Check if identity is vague (no recruiter data)
+        const scamSignals = analysisData.scamAnalysis?.signals || {};
+        if (scamSignals.identityVague > 0.5) {
+          score = 50; // Uncertain - no data to verify
+        } else {
+          score = (100 - scamScore); // Lower scam score = better recruiter
+        }
         break;
       case 'domain':
         score = (100 - scamScore * 0.7); // Domain tied to scam signals
@@ -217,9 +223,9 @@ function TrustGraph({ companyName, scamScore, ghostScore, roiScore, analysisData
       {/* Coupling Explanation */}
       <div className="text-sm text-text-secondary italic">
         <p>
-          <strong className="text-text-primary">Trust Graph Coupling:</strong> Node colors are mathematically 
-          derived from the weighted scores. Changing a node's state (e.g., community reports) 
-          automatically recalculates and updates the displayed scores. This is the reasoning engine made visible.
+          <strong className="text-text-primary">Trust Graph Coupling:</strong> Node colors are mathematically
+          derived from the weighted scores. Changing a node's state (e.g., community reports)
+          automatically recalculates and updates the displayed scores.
         </p>
       </div>
     </div>

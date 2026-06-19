@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { analyzeScamSignals, analyzeApplicationROI, analyzeGhostJobSignals, calculateScores, compareOpportunities } from '../services/groq';
 import { searchCompanyInfo, extractCompanyName, extractJobTitle } from '../services/serper';
 import { getCommunityReportStats } from '../services/supabase';
 import ChatInterface from '../components/ChatInterface';
+import TypewriterText from '../components/TypewriterText';
+import Navigation from '../components/Navigation';
 
 function Compare() {
   const [formData, setFormData] = useState({
@@ -11,10 +13,39 @@ function Compare() {
     listingB: ''
   });
   const [loading, setLoading] = useState(false);
+  const [loadingStage, setLoadingStage] = useState('');
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
+  const [rateLimitResetTime, setRateLimitResetTime] = useState(null);
+  const [countdown, setCountdown] = useState('');
 
   const countries = ['Nigeria', 'Kenya', 'Ghana', 'South Africa', 'Côte d\'Ivoire', 'Other'];
+
+  // Countdown timer for rate limit
+  useEffect(() => {
+    if (!rateLimitResetTime) {
+      setCountdown('');
+      return;
+    }
+
+    const timer = setInterval(() => {
+      const now = new Date();
+      const diff = rateLimitResetTime - now;
+
+      if (diff <= 0) {
+        setCountdown('');
+        setRateLimitResetTime(null);
+        setError('');
+        clearInterval(timer);
+      } else {
+        const minutes = Math.floor(diff / 60000);
+        const seconds = Math.floor((diff % 60000) / 1000);
+        setCountdown(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [rateLimitResetTime]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -30,17 +61,20 @@ function Compare() {
 
     try {
       // Analyze listings sequentially to avoid rate limiting
+      setLoadingStage('Analyzing Opportunity A...');
       const analysisA = await analyzeListing(formData.listingA, formData.country, 'A');
       
       // Delay between listings
       await new Promise(resolve => setTimeout(resolve, 2000));
       
+      setLoadingStage('Analyzing Opportunity B...');
       const analysisB = await analyzeListing(formData.listingB, formData.country, 'B');
 
       // Delay before comparison
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       // Get comparison from AI
+      setLoadingStage('Comparing opportunities...');
       const comparison = await compareOpportunities(analysisA, analysisB);
 
       setResults({
@@ -51,11 +85,45 @@ function Compare() {
 
     } catch (err) {
       console.error('Comparison error:', err);
-      setError(err.message || 'Comparison failed. Please try again.');
+      
+      // Check if it's a rate limit error
+      if (err.message && err.message.startsWith('RATE_LIMIT:')) {
+        const resetTime = new Date(err.message.split(':')[1]);
+        setRateLimitResetTime(resetTime);
+        setError('Rate limit exceeded. Please wait...');
+      } else {
+        setError(err.message || 'Comparison failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
   };
+
+  // Countdown timer for rate limit
+  useEffect(() => {
+    if (!rateLimitResetTime) {
+      setCountdown('');
+      return;
+    }
+
+    const timer = setInterval(() => {
+      const now = new Date();
+      const diff = rateLimitResetTime - now;
+
+      if (diff <= 0) {
+        setCountdown('');
+        setRateLimitResetTime(null);
+        setError('');
+        clearInterval(timer);
+      } else {
+        const minutes = Math.floor(diff / 60000);
+        const seconds = Math.floor((diff % 60000) / 1000);
+        setCountdown(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [rateLimitResetTime]);
 
   const analyzeListing = async (listingText, country, label) => {
     const companyName = extractCompanyName(listingText);
@@ -90,19 +158,7 @@ function Compare() {
 
   return (
     <div className="min-h-screen">
-      {/* Navigation */}
-      <nav className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            <a href="/" className="text-2xl font-bold text-primary whitespace-nowrap">JobShield AI</a>
-            <div className="flex space-x-6">
-              <a href="/analyze" className="text-text-secondary hover:text-text-primary">Analyze</a>
-              <a href="/tracker" className="text-text-secondary hover:text-text-primary">Tracker</a>
-              <a href="/dashboard" className="text-text-secondary hover:text-text-primary">Dashboard</a>
-            </div>
-          </div>
-        </div>
-      </nav>
+      <Navigation />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="text-center mb-12">
@@ -172,14 +228,27 @@ function Compare() {
 
             {error && (
               <div className="bg-danger/10 border border-danger/50 rounded-lg p-4">
-                <p className="text-danger text-sm">{error}</p>
+                <div className="flex items-center justify-between">
+                  <p className="text-danger text-sm">{error}</p>
+                  {countdown && (
+                    <div className="flex items-center space-x-2">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-danger"></div>
+                      <span className="text-danger font-mono font-bold text-lg">{countdown}</span>
+                    </div>
+                  )}
+                </div>
+                {countdown && (
+                  <p className="text-danger/70 text-xs mt-2">
+                    You can try again in {countdown} minutes. The rate limit will reset automatically.
+                  </p>
+                )}
               </div>
             )}
 
             {loading && (
               <div className="bg-primary/10 border border-primary/50 rounded-lg p-6 text-center">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
-                <p className="text-primary font-medium">Analyzing both opportunities...</p>
+                <p className="text-primary font-medium">{loadingStage}</p>
                 <p className="text-text-secondary text-sm mt-2">This may take up to 2 minutes</p>
               </div>
             )}
@@ -367,7 +436,9 @@ function Compare() {
                         Advantage: {tradeoff.advantageGoes}
                       </span>
                     </div>
-                    <p className="text-text-secondary">{tradeoff.explanation}</p>
+                    <p className="text-text-secondary">
+                      <TypewriterText text={tradeoff.explanation} speed={25} />
+                    </p>
                   </div>
                 ))}
               </div>
@@ -383,7 +454,9 @@ function Compare() {
                 {(results.comparison.hiddenConsiderations || []).map((consideration, idx) => (
                   <li key={idx} className="flex items-start space-x-3">
                     <span className="text-warning text-xl">💡</span>
-                    <span className="text-text-primary">{consideration}</span>
+                    <span className="text-text-primary">
+                      <TypewriterText text={consideration} speed={25} />
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -395,22 +468,18 @@ function Compare() {
                 <h4 className="text-lg font-bold text-text-primary mb-3">
                   If you choose Opportunity A:
                 </h4>
-                <p className="text-text-secondary">{results.comparison.likelyOutcomeA}</p>
+                <p className="text-text-secondary">
+                  <TypewriterText text={results.comparison.likelyOutcomeA} speed={25} />
+                </p>
               </div>
               <div className="card">
                 <h4 className="text-lg font-bold text-text-primary mb-3">
                   If you choose Opportunity B:
                 </h4>
-                <p className="text-text-secondary">{results.comparison.likelyOutcomeB}</p>
+                <p className="text-text-secondary">
+                  <TypewriterText text={results.comparison.likelyOutcomeB} speed={25} />
+                </p>
               </div>
-            </div>
-
-            {/* Why AI Beat Rules */}
-            <div className="card bg-primary/5">
-              <h4 className="text-lg font-bold text-text-primary mb-3">
-                Why this required AI reasoning (not just rules):
-              </h4>
-              <p className="text-text-secondary italic">{results.comparison.whyAIBeatRulesHere}</p>
             </div>
 
             {/* Chat Interface */}

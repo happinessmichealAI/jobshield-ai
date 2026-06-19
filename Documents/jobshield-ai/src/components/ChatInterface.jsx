@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { chatWithAI } from '../services/groq';
+import TypewriterText from './TypewriterText';
 
 function ChatInterface({ context, listingData }) {
   const [messages, setMessages] = useState([
@@ -83,7 +84,13 @@ function ChatInterface({ context, listingData }) {
                   : 'bg-surface border border-border text-text-primary'
               }`}
             >
-              <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+              {message.role === 'assistant' && idx > 0 ? (
+                <p className="text-sm whitespace-pre-wrap">
+                  <TypewriterText text={message.content} speed={20} />
+                </p>
+              ) : (
+                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+              )}
             </div>
           </div>
         ))}
@@ -124,18 +131,23 @@ function ChatInterface({ context, listingData }) {
 
       {/* Input Form */}
       <form onSubmit={handleSubmit} className="flex gap-2">
+        <label htmlFor="chat-input" className="sr-only">Ask a question</label>
         <input
           type="text"
+          id="chat-input"
+          name="chat-input"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Ask me anything about this opportunity..."
           className="input-field flex-1"
           disabled={loading}
+          aria-label="Chat message input"
         />
         <button
           type="submit"
           disabled={loading || !input.trim()}
           className="btn-primary px-6 disabled:opacity-50 disabled:cursor-not-allowed"
+          aria-label="Send message"
         >
           {loading ? (
             <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>

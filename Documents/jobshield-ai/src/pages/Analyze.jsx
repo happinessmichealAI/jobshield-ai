@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { analyzeScamSignals, analyzeApplicationROI, analyzeGhostJobSignals, calculateScores, generateVerdict } from '../services/groq';
 import ChatInterface from '../components/ChatInterface';
+import Navigation from '../components/Navigation';
 import { searchCompanyInfo, extractCompanyName, extractJobTitle } from '../services/serper';
 import { saveAnalyzedListing, getCommunityReportStats } from '../services/supabase';
 
@@ -14,7 +15,10 @@ function Analyze() {
   });
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState('');
+  const [completedSteps, setCompletedSteps] = useState([]);
   const [error, setError] = useState('');
+  const [rateLimitResetTime, setRateLimitResetTime] = useState(null);
+  const [countdown, setCountdown] = useState('');
   const [analysisComplete, setAnalysisComplete] = useState(false);
   const [analysisData, setAnalysisData] = useState(null);
 
@@ -37,8 +41,14 @@ function Analyze() {
 
     setLoading(true);
     setError('');
+    setCompletedSteps([]);
 
     try {
+      // Step 1: Checking recruiter identity
+      setLoadingStage('Checking recruiter identity...');
+      await new Promise(resolve => setTimeout(resolve, 400));
+      setCompletedSteps(['recruiter']);
+      
       // Clean and preprocess the listing text
       let cleanedText = formData.listingText;
       
@@ -67,16 +77,28 @@ function Analyze() {
       const companyName = extractCompanyName(cleanedText);
       const jobTitle = extractJobTitle(cleanedText);
 
+      // Step 2: Cross-referencing domain age
+      setLoadingStage('Cross-referencing domain age...');
+      await new Promise(resolve => setTimeout(resolve, 400));
+      setCompletedSteps(['recruiter', 'domain']);
+
       // Stage 1: Scam Detection
       setLoadingStage('Scanning for fraud signals...');
       const scamAnalysis = await analyzeScamSignals(cleanedText, formData.country);
+      setCompletedSteps(['recruiter', 'domain', 'fraud']);
 
       // Small delay to avoid rate limiting
       await new Promise(resolve => setTimeout(resolve, 1000));
 
+      // Step 3: Scanning community reports
+      setLoadingStage('Scanning community reports...');
+      const communityStats = await getCommunityReportStats(companyName);
+      setCompletedSteps(['recruiter', 'domain', 'fraud', 'community']);
+
       // Stage 2: Application ROI
       setLoadingStage('Analyzing application value...');
       const roiAnalysis = await analyzeApplicationROI(cleanedText);
+      setCompletedSteps(['recruiter', 'domain', 'fraud', 'community', 'roi']);
 
       // Small delay to avoid rate limiting
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -84,10 +106,10 @@ function Analyze() {
       // Stage 3: Web Search + Ghost Job Detection
       setLoadingStage('Investigating company history...');
       const webSearchResults = await searchCompanyInfo(companyName, jobTitle);
+      
+      setLoadingStage('Calculating risk signals...');
       const ghostAnalysis = await analyzeGhostJobSignals(companyName, jobTitle, webSearchResults.summary);
-
-      // Get community reports
-      const communityStats = await getCommunityReportStats(companyName);
+      setCompletedSteps(['recruiter', 'domain', 'fraud', 'community', 'roi', 'risk']);
 
       // Calculate scores using weighted engine
       const scores = calculateScores(
@@ -136,33 +158,55 @@ function Analyze() {
       setAnalysisComplete(true);
       setLoading(false);
 
-      // Scroll to chat
-      setTimeout(() => {
-        document.getElementById('chat-section')?.scrollIntoView({ behavior: 'smooth' });
-      }, 500);
+      // Automatically navigate to results page
+      navigate(`/result/${savedListing.id}`);
 
     } catch (err) {
       console.error('Analysis error:', err);
-      setError(err.message || 'Analysis failed. Please try again.');
+      
+      // Check if it's a rate limit error
+      if (err.message && err.message.startsWith('RATE_LIMIT:')) {
+        const resetTime = new Date(err.message.split(':')[1]);
+        setRateLimitResetTime(resetTime);
+        setError('Rate limit exceeded. Please wait a moment and try again.');
+      } else {
+        setError(err.message || 'Analysis failed. Please try again.');
+      }
+      
       setLoading(false);
+      setCompletedSteps([]);
     }
   };
 
+  // Countdown timer for rate limit
+  useEffect(() => {
+    if (!rateLimitResetTime) {
+      setCountdown('');
+      return;
+    }
+
+    const timer = setInterval(() => {
+      const now = new Date();
+      const diff = rateLimitResetTime - now;
+
+      if (diff <= 0) {
+        setCountdown('');
+        setRateLimitResetTime(null);
+        setError('');
+        clearInterval(timer);
+      } else {
+        const minutes = Math.floor(diff / 60000);
+        const seconds = Math.floor((diff % 60000) / 1000);
+        setCountdown(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [rateLimitResetTime]);
+
   return (
     <div className="min-h-screen">
-      {/* Navigation */}
-      <nav className="border-b border-border">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            <a href="/" className="text-2xl font-bold text-primary whitespace-nowrap">JobShield AI</a>
-            <div className="flex space-x-6">
-              <a href="/compare" className="text-text-secondary hover:text-text-primary">Compare</a>
-              <a href="/tracker" className="text-text-secondary hover:text-text-primary">Tracker</a>
-              <a href="/dashboard" className="text-text-secondary hover:text-text-primary">Dashboard</a>
-            </div>
-          </div>
-        </div>
-      </nav>
+      <Navigation />
 
       {/* Main Content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
@@ -225,11 +269,13 @@ Include:
 
           {/* Optional Job URL */}
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">
+            <label htmlFor="job-url" className="block text-sm font-medium text-text-primary mb-2">
               Job URL (Optional)
             </label>
             <input
               type="url"
+              id="job-url"
+              name="job-url"
               value={formData.jobUrl}
               onChange={(e) => setFormData({ ...formData, jobUrl: e.target.value })}
               placeholder="https://..."
@@ -241,30 +287,111 @@ Include:
           {/* Error Message */}
           {error && (
             <div className="bg-danger/10 border border-danger/50 rounded-lg p-4">
-              <p className="text-danger text-sm">{error}</p>
+              <div className="flex items-center justify-between">
+                <p className="text-danger text-sm">{error}</p>
+                {countdown && (
+                  <div className="flex items-center space-x-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-danger"></div>
+                    <span className="text-danger font-mono font-bold text-lg">{countdown}</span>
+                  </div>
+                )}
+              </div>
+              {countdown && (
+                <p className="text-danger/70 text-xs mt-2">
+                  You can try again in {countdown} minutes. The rate limit will reset automatically.
+                </p>
+              )}
             </div>
           )}
 
-          {/* Loading State */}
+          {/* Loading State - Sequential Reveal */}
           {loading && (
             <div className="bg-primary/10 border border-primary/50 rounded-lg p-6">
-              <div className="flex items-center space-x-3 mb-3">
-                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary"></div>
-                <p className="text-primary font-medium">{loadingStage}</p>
-              </div>
-              <div className="space-y-2 text-sm text-text-secondary">
-                <div className="flex items-center space-x-2">
-                  <div className={`w-2 h-2 rounded-full ${loadingStage.includes('fraud') ? 'bg-primary animate-pulse' : 'bg-gray-600'}`}></div>
-                  <span>Scanning for fraud signals</span>
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center space-x-3">
+                  {completedSteps.includes('recruiter') ? (
+                    <span className="text-success text-lg">✓</span>
+                  ) : (
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                  )}
+                  <span className={completedSteps.includes('recruiter') ? 'text-text-primary' : 'text-primary font-medium'}>
+                    Checking recruiter identity...
+                  </span>
                 </div>
-                <div className="flex items-center space-x-2">
-                  <div className={`w-2 h-2 rounded-full ${loadingStage.includes('value') ? 'bg-primary animate-pulse' : 'bg-gray-600'}`}></div>
-                  <span>Analyzing application value</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className={`w-2 h-2 rounded-full ${loadingStage.includes('history') ? 'bg-primary animate-pulse' : 'bg-gray-600'}`}></div>
-                  <span>Investigating company history</span>
-                </div>
+
+                {completedSteps.includes('recruiter') && (
+                  <div className="flex items-center space-x-3">
+                    {completedSteps.includes('domain') ? (
+                      <span className="text-success text-lg">✓</span>
+                    ) : (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    )}
+                    <span className={completedSteps.includes('domain') ? 'text-text-primary' : 'text-primary font-medium'}>
+                      Cross-referencing domain age...
+                    </span>
+                  </div>
+                )}
+
+                {completedSteps.includes('domain') && (
+                  <div className="flex items-center space-x-3">
+                    {completedSteps.includes('fraud') ? (
+                      <span className="text-success text-lg">✓</span>
+                    ) : (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    )}
+                    <span className={completedSteps.includes('fraud') ? 'text-text-primary' : 'text-primary font-medium'}>
+                      Scanning for fraud signals...
+                    </span>
+                  </div>
+                )}
+
+                {completedSteps.includes('fraud') && (
+                  <div className="flex items-center space-x-3">
+                    {completedSteps.includes('community') ? (
+                      <span className="text-success text-lg">✓</span>
+                    ) : (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    )}
+                    <span className={completedSteps.includes('community') ? 'text-text-primary' : 'text-primary font-medium'}>
+                      Scanning community reports...
+                    </span>
+                  </div>
+                )}
+
+                {completedSteps.includes('community') && (
+                  <div className="flex items-center space-x-3">
+                    {completedSteps.includes('roi') ? (
+                      <span className="text-success text-lg">✓</span>
+                    ) : (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    )}
+                    <span className={completedSteps.includes('roi') ? 'text-text-primary' : 'text-primary font-medium'}>
+                      Analyzing application value...
+                    </span>
+                  </div>
+                )}
+
+                {completedSteps.includes('roi') && (
+                  <div className="flex items-center space-x-3">
+                    {completedSteps.includes('risk') ? (
+                      <span className="text-success text-lg">✓</span>
+                    ) : (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    )}
+                    <span className={completedSteps.includes('risk') ? 'text-text-primary' : 'text-primary font-medium'}>
+                      Calculating risk signals...
+                    </span>
+                  </div>
+                )}
+
+                {completedSteps.includes('risk') && (
+                  <div className="flex items-center space-x-3">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    <span className="text-primary font-medium">
+                      Generating assessment...
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           )}
